@@ -1,45 +1,88 @@
-"""FastMCP tools for the asynchronous Seedance 2.5 video contract."""
-import base64,json,os,re
-from pathlib import Path
-from urllib.error import HTTPError
-from urllib.request import Request,urlopen
-try:
- from mcp.server.fastmcp import FastMCP
-except ImportError as exc:
- raise SystemExit("Install the official MCP Python SDK: python -m pip install mcp") from exc
-mcp=FastMCP("seedance-2-5-video")
-BASE=os.getenv("VIDEO_API_BASE_URL","https://argolink.io/v1").rstrip("/")
-_ID=re.compile(r"^[A-Za-z0-9_-]+$")
-def call(path,method="GET",body=None,binary=False):
- key=os.environ.get("VIDEO_API_KEY")
- if not key: raise RuntimeError("Set VIDEO_API_KEY in the MCP host environment")
- headers={"Authorization":f"Bearer {key}","User-Agent":"seedance-2-5-video-mcp/1.0"}
- data=None
- if body is not None: headers["Content-Type"]="application/json"; data=json.dumps(body).encode()
- req=Request(BASE+path,method=method,headers=headers,data=data)
- try:
-  with urlopen(req,timeout=90) as r:
-   raw=r.read(); return raw if binary else json.loads(raw)
- except HTTPError as e:
-  raise RuntimeError(f"HTTP {e.code}: {e.read(500).decode(errors='replace')}") from e
-def check_id(job_id):
- if not isinstance(job_id,str) or not _ID.fullmatch(job_id): raise ValueError("invalid request_id")
+"""A stdio MCP adapter for the Seedance 2.5 video contract.
+
+The MCP layer only translates typed tool arguments. HTTP, request validation,
+upload safety and atomic file handling live in seedance_client so the same
+rules are exercised by tests and by every tool.
+"""
+from __future__ import annotations
+
+from typing import List, Optional
+
+from mcp.server.fastmcp import FastMCP
+
+from seedance_client import SeedanceClient
+
+
+mcp = FastMCP(
+    "seedance-2-5-video",
+    instructions=(
+        "Submit one Seedance 2.5 request, inspect its status, and download its "
+        "completed MP4. Upload media first when a local file is needed. "
+        "The server never polls or retries a generation implicitly."
+    ),
+)
+client = SeedanceClient()
+
+
 @mcp.tool()
-def submit_video(prompt:str,duration:int=5,resolution:str="720p",aspect_ratio:str="16:9",generate_audio:bool=True,model:str="seedance-2.5")->dict:
- if model!="seedance-2.5": raise ValueError("This server is limited to seedance-2.5")
- if not 4<=duration<=30: raise ValueError("duration must be 4..30 seconds")
- if resolution not in {"480p","720p","1080p"}: raise ValueError("resolution must be 480p, 720p, or 1080p")
- return call("/videos/generations","POST",{"model":model,"prompt":prompt,"duration":duration,"resolution":resolution,"aspect_ratio":aspect_ratio,"generate_audio":generate_audio})
+def submit_video(
+    prompt: str,
+    mode: str = "text",
+    duration: Optional[int] = 5,
+    resolution: str = "720p",
+    aspect_ratio: Optional[str] = "16:9",
+    generate_audio: bool = True,
+    start_image: Optional[str] = None,
+    end_image: Optional[str] = None,
+    reference_images: Optional[List[str]] = None,
+    reference_videos: Optional[List[str]] = None,
+    reference_audios: Optional[List[str]] = None,
+    edit_video: Optional[str] = None,
+) -> dict:
+    """Submit text, frame, reference, or edit mode and return its request_id.
+
+    Media values are public HTTPS URLs. For local files, call upload_media first.
+    mode is one of text, start_image, first_last_frames,
+    multimodal_reference, or video_edit.
+    """
+    body = client.build_request(
+        prompt=prompt,
+        mode=mode,
+        duration=duration,
+        resolution=resolution,
+        aspect_ratio=aspect_ratio,
+        generate_audio=generate_audio,
+        start_image=start_image,
+        end_image=end_image,
+        reference_images=reference_images or [],
+        reference_videos=reference_videos or [],
+        reference_audios=reference_audios or [],
+        edit_video=edit_video,
+    )
+    return client.submit(body)
+
+
 @mcp.tool()
-def get_video_status(request_id:str)->dict:
- check_id(request_id); return call("/videos/"+request_id)
+def get_video_status(request_id: str) -> dict:
+    """Read one request; statuses are pending, done, failed, or expired."""
+    return client.status(request_id)
+
+
 @mcp.tool()
-def get_video_media(request_id:str,output_path:str="")->dict:
- check_id(request_id); status=get_video_status(request_id)
- if status.get("status")!="done": raise RuntimeError(f"job is {status.get('status')}; download only after done")
- raw=call("/videos/"+request_id+"/content",binary=True)
- if output_path:
-  path=Path(output_path).expanduser(); path.parent.mkdir(parents=True,exist_ok=True); path.write_bytes(raw)
-  return {"request_id":request_id,"path":str(path),"bytes":len(raw)}
- return {"request_id":request_id,"mp4_base64":base64.b64encode(raw).decode(),"bytes":len(raw)}
-if __name__=="__main__": mcp.run(transport="stdio")
+def download_video(request_id: str, output_path: str) -> dict:
+    """Download a completed MP4 to a new file under VIDEO_MCP_MEDIA_ROOT."""
+    return client.download(request_id, output_path)
+
+
+@mcp.tool()
+def upload_media(file_path: str, content_type: Optional[str] = None) -> dict:
+    """Request an upload ticket and PUT a local image, video, or audio file.
+
+    The key is sent only to the API ticket endpoint; it is never sent to the
+    presigned storage URL. Files must be under VIDEO_MCP_MEDIA_ROOT.
+    """
+    return client.upload(file_path, content_type)
+
+
+if __name__ == "__main__":
+    mcp.run(transport="stdio")
