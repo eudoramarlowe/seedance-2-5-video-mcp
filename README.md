@@ -1,42 +1,37 @@
-# Seedance 2.5 — MCP Video Generation Workflow
+# Seedance 2.5 API — MCP video tools from $0.0874/s
 
-Argolink-focused MCP video generation workflow for Seedance 2.5. This repository is a self-contained integration reference: it explains the request shape, the asynchronous lifecycle where applicable, safe retries, and the failure states that matter in production.
+**ByteDance Seedance 2.5 is available on [ArgoLink](https://argolink.io/gh-seedance-2-5-video-mcp).** This repository is an independent, stdio-only MCP server exposing submit, status, and media tools. It is not affiliated with ByteDance or the MCP project. Last checked: 2026-10-07.
 
-[Seedance 2.5 model page →](https://argolink.io/gh-seedance-2-5-video-mcp) · [Argolink API docs →](https://argolink.io/gh-unified-api-docs)
+## Install
 
-The model page is authoritative for live availability, pricing, limits, and fields. This repository gives the workflow a searchable home; it does not invent a second model catalog.
+python3 -m venv .venv && . .venv/bin/activate
+python -m pip install "mcp>=1.0,<2"
+export VIDEO_API_KEY="your-key"
 
-## What is inside
+The default base URL is https://argolink.io/v1; set VIDEO_API_BASE_URL for a compatible test server. Every request includes a descriptive User-Agent. No key is in this repository or its MCP JSON.
 
-- `docs/model-contract.md`: model-specific facts checked against the current Argolink catalog.
-- `docs/workflow.md`: the intent behind this repository and the decision points that prevent accidental resubmission.
-- `examples/request.sh` and `examples/client.py`: safe, runnable request examples using `ARGOLINK_API_KEY`.
-- `tests/test_repository.py`: offline checks for the public contract and examples.
-- `ARGOLINK.md`: public-boundary rules for contributors.
+## Configure a host
 
-## Quick start
+Claude Desktop configuration uses a server entry with command, args, and env. For Claude Code, use claude mcp add --transport stdio seedance-video --env VIDEO_API_KEY=$VIDEO_API_KEY -- /absolute/.venv/bin/python /absolute/server.py. Cursor uses its MCP settings JSON with the same command/args/env shape. Keep the key in the host secret store and verify the host's current settings UI before copying configuration.
 
-Set the key only in your shell or secret manager, then run the example:
+## Tools and lifecycle
 
-```bash
-export ARGOLINK_API_KEY='your-key'
-./examples/request.sh
-```
+| Tool | Arguments | Behavior |
+|---|---|---|
+| submit_video | prompt, duration, resolution, aspect_ratio, generate_audio | One POST; validates model and duration |
+| get_video_status | request_id | GET; returns pending, done, failed, or expired |
+| get_video_media | request_id, optional output_path | Requires done, then downloads MP4 |
 
-The example uses model ID `seedance-2.5` and endpoint family `/v1/videos/generations`. Submit once, persist the returned task ID, and poll the documented task endpoint before downloading the media URL. A timeout is not evidence that a job failed, so do not submit the same generation again automatically.
+The server has no hidden polling loop: the MCP client chooses an interval and can resume with a saved ID. If a POST times out after the provider may have accepted it, investigate the ID before submitting again. Failed or expired jobs are not charged under the service contract. Content before completion returns 409; failed content returns 424.
 
-## Model facts
+## Model boundary and price
 
-- Model ID: `seedance-2.5`
-- Argolink model page: `https://argolink.io/gh-seedance-2-5-video-mcp` (tracked shortlink; destination is the model page)
-- Endpoint family: `/v1/videos/generations`
-- Listed video tiers: 480p `$0.1352`/second, 720p `$0.30043`/second, 1080p `$0.74555`/second.
-- Base generation rate: `$0.1352`/second before any tier multiplier.
+Seedance 2.5 accepts 4–30 seconds and 480p/720p/1080p; prompt and reference limits belong to its live model page. First/last-frame requests require the documented adaptive ratio. This minimal tool covers text-to-video; add reference uploads only after reviewing the current contract.
 
-## Scope
+Checked effective rates are $0.0874/s (480p), $0.196/s (720p), and $0.483/s (1080p). A five-second 720p sample estimates $0.98. The model page is authoritative when prices change; polling is not generation time.
 
-This repository has one clear search intent: **MCP video generation workflow**. It keeps the integration boundary small enough for a developer or an AI assistant to answer a concrete question, while linking the live Argolink model page for changes.
+## Development and FAQ
 
-## Safety
+python -m py_compile server.py checks syntax. Optional tests use a local mocked urlopen; no key or generation is required. The official MCP SDK is not bundled, and a real host session has not been run here. A local output path is required for downloads; base64 is a fallback for clients without filesystem access.
 
-Never commit an API key, a returned media URL containing a private token, or production input. Examples are deliberately small and do not make a request during tests.
+Can I pass a local image? This minimal server does not upload files; obtain a media URL through the documented upload flow first. Why no automatic polling? Host-side polling keeps the request ID resumable after an interrupted call. Does it expose video? Yes, only this model and three explicit operations; it is not a general gateway.
